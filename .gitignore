@@ -1,0 +1,22 @@
+# Local editor and operating-system files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.tmp
+*.log
+
+# Never commit environment or credential material
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Generated tooling output, if used locally
+node_modules/
+dist/
+coverage/
+.cache/
