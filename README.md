@@ -1,4 +1,4 @@
-# RideSmart — Technical Case Study
+# RideSmart: Technical Case Study
 
 RideSmart is a church-first ride-coordination platform for collecting member responses, matching riders with approved volunteer drivers, planning routes, and supporting day-of pickup workflows.
 
@@ -6,7 +6,7 @@ RideSmart is a church-first ride-coordination platform for collecting member res
 
 > RideSmart's production source code is maintained in a private repository. This public case study documents the system's architecture, engineering decisions, and implementation approach without exposing proprietary code or sensitive configuration.
 
-## Technical snapshot — September 2026
+## Technical snapshot: September 2026
 
 These counts reflect the private repository in September 2026:
 
