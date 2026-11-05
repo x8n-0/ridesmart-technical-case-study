@@ -78,16 +78,16 @@ sequenceDiagram
     actor Driver
     participant API as Next.js API
     participant DB as PostgreSQL
-    participant Opt as C++ optimizer
+    participant Solver as C++ optimizer
 
     Coord->>API: Create and publish ride (optionally with a ride home)
     API-->>Member: Email invitation, in-app notice, push
     Member->>API: Answer: need a seat, can drive, pickup address
     Coord->>API: Close replies, draft the plan
     API->>DB: Read eligible riders, drivers and seats
-    API->>Opt: Anonymous IDs, coordinates, seat counts
+    API->>Solver: Anonymous IDs, coordinates, seat counts
     alt optimizer healthy
-        Opt-->>API: Ranked plans and riders who did not fit
+        Solver-->>API: Ranked plans and riders who did not fit
     else off, slow or malformed
         API->>API: Fallback planner
     end
