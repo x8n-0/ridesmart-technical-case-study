@@ -1,131 +1,131 @@
 # API and data design
 
-RideSmart's API is implemented with Next.js route handlers and TypeScript domain services. The public case study groups the surface by responsibility rather than publishing a complete route inventory.
+The API is built from Next.js route handlers backed by TypeScript domain services. This document groups it by responsibility rather than listing URLs, which would go stale faster than the model behind them.
 
-## Verified API scope
+## Scope
 
-The technical snapshot defined in the root README contained:
+On 4 November 2026 the private repository had **116 API route modules** exporting **132 HTTP method handlers**, and **31 Prisma models** backed by PostgreSQL. Route files and handlers are counted separately because one file can export several methods.
 
-- **62 API route modules**
-- **84 exported HTTP method handlers**
+## Resource areas
 
-This means the older résumé phrase **"42-endpoint REST API" is no longer current**. Route files and HTTP handlers are different counting units, so the case study states both and avoids calling either one a permanent endpoint count.
-
-## Major resource categories
-
-| Category | Representative responsibilities |
+| Area | Responsibilities |
 | --- | --- |
-| Authentication and account | Registration, sessions, sign-in methods, contact verification, profile settings |
-| Organizations and membership | Discovery, join policies, join codes, requests, member roles, driver approval, organization settings |
-| Rides and recurring series | Draft/publish lifecycle, audience, scheduling, recurrence, response deadlines |
-| Responses and locations | RSVP status, seat offers, saved locations, ride-specific pickup snapshots |
-| Planning and assignments | Preview, ranked plans, plan application, manual adjustment, finalization, reassignment |
-| Driver operations | Assignment review, itinerary, route progress, pickup/no-show outcomes |
-| Notifications and preferences | In-app notifications, push-token lifecycle, reminders, per-user and per-organization preferences |
-| Feedback and support | Post-ride feedback, problem reports, contact requests, privacy-aware analytics events |
+| Accounts and sign-in | Email and password, email sign-in links, Google sign-in (web and native), password reset and change, signing out other devices, contact verification |
+| Organizations and membership | Discovery, join codes and policies, join requests, roles, driver approval and pausing, invitations for new emails, settings and time zone |
+| Rides, events and series | Draft, publish, close, reopen, cancel; ride homes linked to an event; weekly series that post their next ride |
+| Answers and pickups | Going or not, seat offers, late seat offers, saved and one-time pickup addresses, coordinators answering for a member |
+| Planning and assignments | Preview ranked plans, apply, move, remove, reorder, change a driver's seats on one ride, make a rider a driver, finalize, driver-out reassignment |
+| Pickup run | Start run, per-rider estimated times, "I'm ready", picked up / couldn't pick up with undo, run history for the driver |
+| Exports | Plan PDF, per-driver sheets, CSV, group-chat text (coordinators only) |
+| Guests | Public event pages, seat requests, single-use verification links, booking status, edit and cancel |
+| Notifications | In-app notices, push token lifecycle, email delivery, per-group preferences |
+| Lifecycle job | Posting recurring rides, closing replies, automatic planning and finalization, starting and completing rides |
+| Feedback, support and analytics | Post-ride feedback, problem reports, contact requests, schema-checked product events |
 
-The exact URL list is intentionally omitted. It would add little architectural value and would become stale faster than the resource model.
+## Authorization is layered
 
-## Request validation
+RideSmart keeps apart several ideas that are often folded into one role column:
 
-Zod schemas parse many state-changing request bodies and normalize the resulting TypeScript types before domain logic runs. Validation covers shapes such as:
+1. **Authentication:** a current session for an account that still exists, invalidated when the password changes.
+2. **Platform role:** platform administration, separate from any organization.
+3. **Membership:** a membership record that is active; banned or removed members cannot rejoin through a join route.
+4. **Organization role:** member or administrator (the owner is treated as an administrator).
+5. **Driver capability:** whether this member may offer seats in this organization: none, pending, approved, rejected or paused. Independent of role.
+6. **Resource relationship:** the member's own answer, the driver's own car, a rider's own car, the ride's audience.
 
-- authentication and account input;
-- organization membership transitions;
-- ride creation and updates;
-- response and seat-capacity input;
-- proposed assignment plans;
-- navigation/pickup updates; and
-- settings, support, and analytics payloads.
+Being an administrator does not make someone a driver, and being a driver grants no administration.
 
-Validation is not presented as a substitute for authorization or business rules. A structurally valid request may still be rejected because the user is not an active member, lacks the required role, the ride is in the wrong state, a driver is not approved, or the proposed plan is stale.
+### Who sees what
 
-## Authentication and authorization boundaries
+Visibility rules are enforced on the server, not by hiding fields in the UI:
 
-RideSmart separates several concepts that are often collapsed into one role field:
+- Draft rides are invisible to members in lists, search, counts and direct links.
+- Member contact details and addresses are hidden from other members. Riders see only the names of the people in their own car, not the whole plan.
+- A driver sees the pickups of the riders in their own car, for the rides they drive.
+- Plan exports and sharing are coordinator-only.
 
-1. **Authentication:** establish a current user session and confirm that the account still exists.
-2. **Platform role:** reserve platform-wide administration from organization roles.
-3. **Organization membership:** require a membership record and, for operational actions, an active status.
-4. **Organization role:** distinguish member and administrator permissions; the organization owner is also treated as an administrator.
-5. **Driver capability:** track whether a member is approved to offer seats. This is orthogonal to admin/member role.
-6. **Resource relationship:** verify ride response, assigned-driver, audience, or ownership relationships when the action requires them.
+## Validation
 
-This layered model supports least-privilege decisions. For example, being an organization admin does not automatically make someone an approved driver, and being an approved driver does not grant organization administration.
+Zod schemas parse state-changing request bodies before any domain logic runs: account input, membership changes, ride creation and edits, answers and seat counts, proposed plans, pickup updates, guest requests, settings and analytics events. Responses from the optimizer and data the mobile app reads back from storage are validated the same way.
 
-## High-level relational model
+Shape validation is never treated as permission. A well-formed request is still refused if the member is inactive, the ride is in the wrong state, the driver is not approved, or the plan is stale.
 
-The snapshot contained 23 PostgreSQL-backed Prisma models. The diagram below shows only the relationships central to ride coordination.
+## Relational model
+
+The diagram shows the relationships at the heart of ride coordination; account, settings, notification-delivery and guest-verification tables are omitted.
 
 ```mermaid
 erDiagram
-    USER ||--o{ MEMBERSHIP : joins
-    ORGANIZATION ||--o{ MEMBERSHIP : contains
+    USER ||--o{ ORGANIZATION_MEMBER : "belongs through"
+    ORGANIZATION ||--o{ ORGANIZATION_MEMBER : has
     ORGANIZATION ||--o{ RIDE : owns
     ORGANIZATION ||--o{ RIDE_SERIES : schedules
-    RIDE_SERIES ||--o{ RIDE : produces
-    USER ||--o{ RIDE_RESPONSE : submits
+    RIDE_SERIES ||--o{ RIDE : posts
+    RIDE_EVENT ||--o{ RIDE : "groups (one per direction)"
     RIDE ||--o{ RIDE_RESPONSE : collects
-    USER ||--o{ SAVED_LOCATION : maintains
-    SAVED_LOCATION o|--o{ RIDE_RESPONSE : sources
-    RIDE ||--o{ DRIVER_ASSIGNMENT : has
-    USER ||--o{ DRIVER_ASSIGNMENT : drives
-    DRIVER_ASSIGNMENT ||--o{ ASSIGNED_RIDER : includes
-    USER ||--o{ ASSIGNED_RIDER : rides
-    RIDE ||--o{ NOTIFICATION : triggers
+    USER ||--o{ RIDE_RESPONSE : answers
+    USER ||--o{ SAVED_LOCATION : keeps
+    RIDE ||--o{ DRIVER_ASSIGNMENT : "has cars"
+    DRIVER_ASSIGNMENT ||--o{ DRIVER_ASSIGNMENT_RIDER : seats
+    DRIVER_ASSIGNMENT ||--o{ DRIVER_ASSIGNMENT_GUEST_GROUP : seats
+    RIDE_EVENT ||--o{ GUEST_BOOKING : receives
+    GUEST_BOOKING ||--o{ GUEST_RIDE_REQUEST : "one per direction"
+    RIDE ||--o{ RIDE_RUN_EVENT : records
     USER ||--o{ NOTIFICATION : receives
 ```
 
-## Notable schema decisions
+## Schema decisions
 
-### Membership is a durable relationship
+### Membership is one durable row
 
-Each user/organization pair has one membership record whose status changes over time. This makes the current state easy to query and prevents duplicate memberships.
-
-**Tradeoff:** discrete join/leave cycles are not separate rows. A future audit-log requirement would add an event table rather than overloading the membership record.
+Each user and organization pair has one membership row whose status changes over time. Current state is a single lookup and duplicates are impossible. If an audit trail of join and leave cycles is needed later, it will be an event table, not extra rows here.
 
 ### Driver approval is not a role
 
-Driver status lives on the organization membership. A member or administrator may independently be approved, pending, revoked, or not participating as a driver.
+Driver status lives on the membership. Approving someone to drive never requires granting them administration, and pausing a driver does not touch their membership.
 
-**Why:** authorization and operational capability answer different questions. Keeping them separate prevents role escalation just to let someone drive.
+### Pickups are snapshotted per ride
 
-### Ride-specific pickup information is snapshotted
+An answer may point to a saved location but also stores the pickup used for that ride. A member can leave from somewhere else just once, and editing a saved address later does not move a pickup a driver has already been given. Coordinates are only stored when they belong to the text: editing the address clears them, and the server geocodes strictly, refusing partial or ambiguous matches rather than guessing.
 
-A response may reference a saved location, but it also stores the pickup values used for that ride.
+### A ride home is a second ride, not a new shape
 
-**Why:** a member may leave from a different place for one ride, and later profile edits must not rewrite an assignment already given to a driver.
+A `RideEvent` groups an outbound ride and, optionally, a return ride, with a uniqueness rule of one ride per direction per event. Each direction keeps its own answers, cars and finalization. The two-way feature for members needed **no new tables or columns**: the work was behaviour (one form, one deadline, reverse planning, direction labels), which the design record set out before any code was written.
 
-### Recurring rides remain independent
+### Recurring rides are ordinary rides
 
-Each generated occurrence is a normal ride row linked to its series.
+A series posts real ride rows, each with its own answers, cars and lifecycle. Dates step from the first occurrence in the organization's time zone, so a 9:00 service stays at 9:00 through daylight saving changes.
 
-**Why:** responses, assignments, cancellation, and completion belong to an occurrence. Series operations can still target future occurrences without treating them as one shared ride.
+### Guests are seat-demand groups
 
-### Assignment history is preserved
+A guest booking can bring several people. Planning treats each group as one unit with a seat demand that is never split across cars. Members have a seat demand of one, so members and guests go through the same capacity validator.
 
-Driver assignments use explicit statuses. Reassignment can cancel an old record and create a replacement instead of rewriting operational history.
+### Run events are append-only and idempotent
 
-### Cross-assignment uniqueness is enforced in the service transaction
+Pickup outcomes, "running late" and alerts are rows in a run-event log. Each client-generated event carries a unique ID, so an action queued offline on a phone and replayed later is recorded once, with the time it actually happened. Free-text reasons are cleared 90 days after the ride.
 
-The schema prevents the same rider from being duplicated inside one driver assignment. Preventing a rider from appearing in two active assignments for the same ride depends on the statuses of multiple records, so the API serializes assignment mutations by ride and checks the invariant before writing.
+### Assignment history is kept
 
-**Tradeoff:** the database cannot communicate this rule through one ordinary uniqueness constraint. Correctness therefore depends on one shared transaction boundary and dedicated concurrency tests.
+Cars have explicit statuses. Reassigning a driver cancels the old car and creates a new one instead of rewriting history.
 
-## Write-path pattern
+### Cross-assignment uniqueness lives in the transaction
 
-Safety-critical writes follow the same shape:
+The schema prevents a rider appearing twice in one car. Preventing a rider appearing in two active cars on the same ride depends on the status of several rows, so the API serializes every assignment change for a ride and checks the rule before writing. The cost is that correctness depends on one shared transaction boundary, which is why the race tests exist.
 
-1. Authenticate the user.
-2. Resolve the target resource without returning deleted records.
-3. Enforce membership, role, capability, and resource-specific access.
-4. Parse the request with a typed schema where input is accepted.
-5. Perform slow planning or external work outside the lock.
-6. Enter a short transaction scoped to one ride.
-7. Re-read status, responses, assignments, and capacity under that transaction.
-8. Reject stale or invalid state; otherwise write atomically.
-9. Build notifications or response views after the protected decision.
+## The write path
+
+Every write that can seat, move or remove someone follows the same shape:
+
+1. Authenticate.
+2. Load the target, excluding deleted records.
+3. Check membership, role, driver capability and the resource relationship.
+4. Parse input with a typed schema.
+5. Do slow work outside the lock: optimization, route lookups, geocoding.
+6. Open a short transaction and take the per-ride advisory lock. If the lock is not available within 8 seconds, return a clear "this ride is busy" response rather than an error.
+7. Re-read ride status, answers, cars and seat counts inside the transaction.
+8. Refuse stale or invalid state; otherwise write, with status changes conditional on the status they were decided from.
+9. After commit, build the response and send notifications.
 
 ## Data minimization
 
-The optimizer receives only one ride's planning data: anonymous internal identifiers, coordinates required for routing, seat capacity, and the destination. It does not receive credentials, membership administration data, notification preferences, or direct database access.
+The optimizer receives one ride's planning data only: identifiers, the coordinates needed for routing, seat counts and the destination. Display names are optional in its contract and play no part in ranking. It never receives credentials, permissions or database access. Product analytics carry enums, booleans and counts only, and a contract test fails if the mobile and server event definitions drift apart.

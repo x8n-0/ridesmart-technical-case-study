@@ -1,90 +1,98 @@
 # RideSmart: Technical Case Study
 
-RideSmart is a church-first ride-coordination platform for collecting member responses, matching riders with approved volunteer drivers, planning routes, and supporting day-of pickup workflows.
+RideSmart coordinates volunteer rides for churches. A coordinator posts a ride, members say whether they need a seat or can offer one, a C++ optimizer drafts pickup groups, the coordinator adjusts and sends the plan, and drivers run their pickups live while riders see when they will be collected.
 
-**Live product and visual demonstration:** [https://ridesmartapp.ca](https://ridesmartapp.ca)
+**Live product:** [ridesmartapp.ca](https://ridesmartapp.ca)
 
-> RideSmart's production source code is maintained in a private repository. This public case study documents the system's architecture, engineering decisions, and implementation approach without exposing proprietary code or sensitive configuration.
+> The production source code is private. This repository explains how RideSmart is built and why: its architecture, data model, concurrency strategy, optimizer, testing and the problems found in real use. It contains no application code, credentials, configuration or user data.
 
-## Technical snapshot: September 2026
+## At a glance (November 2026)
 
-These counts reflect the private repository in September 2026:
-
-- **62 API route modules** exposing **84 HTTP method handlers**
-- **23 PostgreSQL-backed Prisma models**
-
-The optimizer's production-oriented candidate-pool target is approximately 200 plans. Its ranking path switches from sequential to multithreaded evaluation at 4,096 candidates, so the normal pool intentionally remains sequential.
+| | |
+| --- | --- |
+| **Status** | In a free founding pilot with church congregations, running real Sunday and midweek rides |
+| **Built by** | One engineer: product, web, API, mobile, database, optimizer, testing and CI |
+| **Clients** | Next.js coordinator dashboard and member portal; Expo mobile app (Android tested on a phone, iOS not yet) |
+| **API** | 116 route modules exposing 132 HTTP handlers |
+| **Data** | 31 PostgreSQL tables modelled in Prisma |
+| **Automated tests** | 2,465 Jest tests (1,996 web, 469 mobile), Playwright journeys against a real Postgres in CI, and C++ checks built into the optimizer image |
+| **History** | 400+ commits since April 2026; 96 written decision records |
 
 ## The problem
 
-Volunteer transportation is often coordinated through spreadsheets, chats, and phone calls. That makes it difficult to know who needs a ride, which approved drivers have capacity, whether everyone is assigned, and what changed after responses were updated.
+Church transportation usually runs on a group chat, a spreadsheet and one tired coordinator. Nobody is sure who still needs a seat, which drivers have room, whether the plan reached everyone, or what changed after someone cancelled on Saturday night.
 
-RideSmart gives an organization control over membership, driver approval, ride publication, assignment review, and finalization while giving members a focused RSVP and pickup experience.
+RideSmart gives the coordinator one place to collect answers, build and send a plan, and watch the ride happen. Members get a short reply form and a clear message: who is picking them up, and when.
 
-## Major capabilities
+## What it does
 
-- Membership, join policies, admin approval, and per-organization driver approval
-- One-off and recurring rides with audiences, deadlines, RSVP, and seat offers
-- Saved or ride-specific pickup locations, reminders, and notifications
-- Ranked pickup-group suggestions with explicit unassigned-rider handling
-- Admin review, manual adjustment, finalization, and driver-out reassignment
-- Driver itinerary, pickup/no-show tracking, route handoff, and completion
+**Coordinators**
+- Post one-off or weekly rides, with an audience, a reply deadline and an optional ride home
+- Draft a plan with the optimizer, compare suggestions, then drag people between cars on a map
+- Send the plan by email, in-app notice and push; export it as a PDF, per-driver sheets, CSV or chat text
+- Approve members and drivers, pause drivers, add guests, and watch a ride live on the day
 
-## My engineering contributions
+**Members and drivers**
+- Answer a ride (and its ride home) in one form, with saved or one-time pickup addresses
+- Offer seats, see their car, driver and pickup time, and tell the driver "I'm ready"
+- Drivers run their pickups stop by stop: road-following route, Picked up / Couldn't pick up with undo, and riders told their time when the run starts
 
-I designed and implemented RideSmart across its web, API, mobile, data, and optimization layers. My work includes the monorepo and shared TypeScript contracts; the Next.js application and API; the Expo member and driver application; the PostgreSQL/Prisma data model; authentication, authorization, and validation boundaries; the C++ optimizer integration; concurrency-safe assignment writes; and automated testing across the platform.
-
-Automated coverage spans the web application, mobile application, API boundaries, accessibility behavior, and end-to-end workflows.
-
-## Verified technology stack
-
-| Layer | Technology |
-| --- | --- |
-| Web and API | Next.js 16, React 19, TypeScript, Zod, Auth.js/NextAuth |
-| Mobile | Expo 54, React Native 0.81, Expo Router, TypeScript |
-| Data | PostgreSQL, Prisma 7 |
-| Optimization | C++23, standard-library threading, JSON over HTTP |
-| Testing | Jest, Testing Library, Playwright, TypeScript, ESLint |
-| Workspace | pnpm workspaces and Turborepo |
+**Guests**
+- People without an account can request a seat through a public event link, verified by a single-use email link
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    W[Web experience] --> A[Next.js application and API]
+    W[Web: dashboard and member portal] --> A[Next.js API]
     M[Expo mobile app] --> A
-    A --> G[Authentication, validation, and access guards]
-    G --> D[Ride and assignment domain services]
+    G[Guest event pages] --> A
+    A --> GU[Session, membership, role and resource guards]
+    GU --> D[Ride, planning and run services]
     D --> P[(PostgreSQL via Prisma)]
-    D --> O[C++ assignment optimizer]
-    O --> D
-    D --> X[Maps, notifications, and email adapters]
+    D --> O[C++ optimizer service]
+    O -. fails or times out .-> F[In-process fallback planner]
+    D --> X[Email, push, maps and analytics adapters]
+    C[Scheduled lifecycle job] --> D
 ```
 
-The optimizer improves plan quality but is not a single point of failure. If it is disabled, times out, or returns an invalid result, the API can build a simpler capacity-based plan.
+One server is the authority for every client. The optimizer proposes; only the API commits, and only after re-checking the plan against current data inside a per-ride lock.
 
-## Technical highlights
+## Engineering highlights
 
-- **Layered access control:** session, membership, role/capability, and resource checks are separate server-side boundaries.
-- **Concurrency-aware writes:** planning happens outside the critical section; the plan is revalidated against locked, current state before persistence.
-- **Stable historical data:** ride-specific pickup details are snapshotted so later profile edits do not rewrite a coordinated trip.
-- **Resilient optimization:** the C++ service returns ranked alternatives and unassigned riders while the API retains a deterministic fallback.
+- **Correct under concurrency.** Every write that seats, moves or removes a rider takes one per-ride PostgreSQL advisory lock and re-reads the ride inside it. Slow work (optimization, routing, email) stays outside the lock. Race tests interleave real route handlers and include lock-disabled controls to prove they can catch the race. [Read more](docs/engineering-notes.md#1-two-coordinators-one-ride)
+- **Automation decides the same way people do.** The scheduled job that closes, plans and finalizes rides uses the same validator and the same unassigned-rider count as the coordinator's buttons, so the two paths cannot disagree.
+- **An optimizer that is useful but never required.** A standalone C++23 service ranks candidate plans. If it is off, slow, unreachable or returns something malformed, the API validates the response, falls back to a simpler planner, and logs which path was used and why.
+- **Round trips with no new tables.** A ride home is a second ride linked to the same event, so each direction keeps its own answers, cars and finalization. Return rides are planned in reverse: church first, then drop-offs.
+- **Built from pilot feedback.** Many recent changes come from watching real use: emailed invitations because web members never saw in-app notices, a sign-in page that ad blockers hid, and time zone data that lagged a provincial law. [Read the stories](docs/engineering-notes.md)
 
-## Selected tradeoffs
+## Technology
 
-| Decision | Tradeoff |
+| Layer | Technology |
 | --- | --- |
-| Plan outside the database lock, then revalidate | A stale plan may be rejected, but slow optimization does not block other ride writes |
-| Keep the optimizer optional | Fallback plans are less geographically sophisticated, but assignment remains available |
-| Enforce cross-assignment rider uniqueness in serialized service logic | The transaction boundary and race tests become essential because one ordinary database constraint cannot express the full rule |
+| Web and API | Next.js 16, React 19, TypeScript, Zod, Auth.js |
+| Mobile | Expo 54, React Native 0.81, Expo Router, Reanimated, Gesture Handler |
+| Data | PostgreSQL, Prisma 7 |
+| Optimization | C++23, standard-library threads, JSON over HTTP, shipped as a Linux container |
+| Messaging | Transactional email, Expo push with Firebase Cloud Messaging, in-app notices |
+| Testing and CI | Jest, Testing Library, axe, Playwright, GitHub Actions with a Postgres service container |
+| Workspace | pnpm workspaces and Turborepo |
 
-## Explore the system
+## Read further
 
-- [Architecture and request flows](docs/architecture.md)
-- [API and data design](docs/api-and-data-design.md)
-- [C++ optimization service](docs/optimization-service.md)
-- [Security, validation, and testing](docs/security-validation-and-testing.md)
+| Document | What it covers |
+| --- | --- |
+| [Architecture](docs/architecture.md) | Components, ride lifecycle, request flows and design decisions |
+| [API and data design](docs/api-and-data-design.md) | Resource areas, layered authorization, the relational model and write paths |
+| [Optimization service](docs/optimization-service.md) | The C++ planner, where concurrency is used, hardening and fallback |
+| [Security, validation and testing](docs/security-validation-and-testing.md) | Threats and controls, validation layers, test strategy and CI |
+| [Engineering notes](docs/engineering-notes.md) | Eight specific problems and how they were solved |
+| [Product and pilot](docs/product-and-pilot.md) | Users, scope decisions, what the pilot changed, and how the work is run |
 
-## Source-code statement
+## About the numbers
 
-RideSmart's production source code remains private. This documentation-only repository contains no application source, Git history, credentials, environment files, database exports, real user data, internal URLs, or deployment configuration.
+Counts come from the private repository on 4 November 2026. Route modules and HTTP handlers are counted separately because one route file can export several methods. Test totals are from full local Jest runs on that date, all passing.
+
+## Source code
+
+RideSmart's source code remains private. This repository is documentation only: no application source, Git history, credentials, environment files, database exports, real user data, internal URLs or deployment configuration. I am happy to walk through the code in an interview.

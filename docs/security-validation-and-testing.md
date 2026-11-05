@@ -1,107 +1,95 @@
-# Security, validation, and testing
+# Security, validation and testing
 
-RideSmart coordinates membership, pickup information, and driver/rider assignments. The engineering approach is to keep authority on the server, minimize data crossing service boundaries, and test the state transitions where stale or concurrent requests can cause operational harm.
+RideSmart holds people's home addresses, phone numbers and where they will be on a Sunday morning. The approach is to keep authority on the server, send as little data as possible across each boundary, and test hardest where stale or simultaneous requests could put the wrong person in the wrong car.
 
-This document describes controls at a public-safe level. It omits secrets, provider identifiers, internal URLs, and deployment-specific security configuration.
+Secrets, provider identifiers, internal URLs and deployment configuration are left out of this document.
 
-## Security boundaries
+## Threats and controls
 
 | Risk | Control |
 | --- | --- |
-| Unauthenticated access | Server-side session checks confirm the current account still exists |
-| Cross-organization access | Organization membership and active status are checked before resource access |
-| Privilege confusion | Platform role, organization role, ownership, and driver capability are separate concepts |
-| Acting on another user's data | Self/resource relationship guards protect user-scoped operations |
-| Malformed or ambiguous input | Zod schemas parse and narrow many request bodies before domain logic |
-| Password disclosure | Passwords are stored through a memory-hard password hash; raw passwords are not persisted |
-| Brute force and abuse | Database-backed limits protect abuse-prone application routes; the optimizer has its own process-local limit |
-| Stale assignment plans | Plans are re-read and revalidated inside a transaction immediately before persistence |
-| Concurrent assignment mutations | One transaction-scoped lock serializes safety-critical writes for a ride |
-| Optimizer compromise or outage | The optimizer has no database authority; responses are validated and a fallback is available |
-| Accidental sensitive logging in this case study | No source, configuration, real data, private URLs, credentials, or Git history are included |
+| Unauthenticated access | Server-side session checks confirm the account still exists; changing a password ends other sessions |
+| Reaching another organization's data | Active membership is checked before any organization resource is read |
+| Privilege confusion | Platform role, organization role, ownership and driver capability are separate checks |
+| Seeing too much | Draft rides hidden from members everywhere; member contact details hidden from other members; riders see only their own car; exports coordinator-only |
+| Removed members coming back | Banned or removed members cannot rejoin through join codes or requests |
+| Malformed input | Zod schemas parse request bodies, optimizer responses and data the mobile app reads back from storage |
+| Password disclosure | Argon2id hashing; raw passwords are never stored |
+| Guest link abuse | Single-use, hashed verification links; a booking-scoped guest session separate from member sign-in; generic public responses that do not reveal whether an email exists |
+| Brute force and abuse | Database-backed rate limits on abuse-prone routes; a separate limit on the optimizer |
+| Stale plans | Plans are re-read and re-validated inside the ride's transaction just before writing |
+| Simultaneous changes | One per-ride advisory lock serializes every safety-critical write |
+| Skipping lifecycle steps | The general update endpoint can only publish, close or cancel; finalizing, starting and completing have their own guarded endpoints |
+| Optimizer exposure or failure | Fails closed without a shared secret, caps and validates input, has no database authority, and its output is validated by the API |
+| Analytics leaking personal data | Events carry enums, booleans and counts only, checked by strict per-event schemas |
 
-## Validation layers
+## Four layers of validation
 
-RideSmart uses four distinct validation layers:
+1. **Shape:** types, required fields, allowed values and request-specific relationships.
+2. **Access:** session, membership, role, driver approval, audience and resource relationship.
+3. **Domain:** lifecycle status, seat capacity, answer eligibility, duplicate riders, whether the action is still allowed.
+4. **Commit time:** the decisive records are re-read inside the serialized transaction before writing.
 
-1. **Shape validation** checks types, required fields, enumerated values, and request-specific relationships.
-2. **Access validation** checks session, membership, role, driver approval, ride audience, and resource relationship.
-3. **Domain validation** checks lifecycle status, capacity, response eligibility, duplicate riders, and whether an operation is still allowed.
-4. **Commit-time validation** re-reads the decisive records inside the serialized transaction before writing.
-
-The separation is deliberate. A request can be well-formed and authenticated but still be unsafe because its view of the ride is stale.
+A request can be well formed and authorized and still be unsafe, because its picture of the ride is out of date. The fourth layer exists for that case.
 
 ## Assignment integrity under concurrency
 
-The core write path avoids holding a lock across slow work:
-
 ```mermaid
 flowchart LR
-    A[Read participants] --> B[Generate plan outside transaction]
+    A[Read participants] --> B[Plan outside the transaction]
     B --> C[Open short transaction]
-    C --> D[Acquire ride-scoped lock]
-    D --> E[Re-read ride, responses, and assignments]
+    C --> D[Take per-ride advisory lock]
+    D --> E[Re-read ride, answers, cars, seats]
     E --> F{Plan still valid?}
-    F -- No --> G[Reject and regenerate or review]
-    F -- Yes --> H[Write assignments atomically]
-    H --> I[Return current review]
+    F -- No --> G[Refuse; coordinator re-plans]
+    F -- Yes --> H[Write atomically, conditional status change]
+    H --> I[After commit: notify, return review]
 ```
 
-The same transaction boundary is reused for initial application, manual mutation, reassignment, automatic lifecycle writes, and finalization. Focused interleaving tests also run lock-disabled controls, which demonstrates that the tests can reproduce the race rather than merely pass the protected code.
+Plan application, manual moves, removals, reordering, seat changes, reassignment, run completion, cancellation, the automatic lifecycle and finalization all go through this one boundary. A lock that cannot be taken within 8 seconds returns a clear "ride is busy" response instead of an error page.
+
+The race tests drive the real route handlers against an interleaving in-memory database and prove: no rider in two active cars, no driver with two cars, no car over capacity, no double finalization, and no finalize interleaved with a change. Each test also has a **lock-disabled control** that must fail, which shows the test can actually reproduce the race rather than passing by luck.
 
 ## Test strategy
 
-Automated coverage spans the web application, mobile application, API boundaries, accessibility behavior, and end-to-end workflows. It includes:
-
-- web Jest tests for API and domain services, components, authorization, assignment planning, concurrency, lifecycle, and accessibility;
-- mobile Jest tests for navigation, presentation state, API adapters, authentication, errors, maps, assignment flows, and accessibility contracts;
-- Playwright journeys for browser-level administration, authentication, and ride lifecycle; and
-- C++ executable checks and benchmarks for distance behavior, candidate validity, ranking, anti-clumping behavior, and sequential/parallel agreement.
-
-The standard repository gate runs:
-
-- web ESLint;
-- web TypeScript;
-- mobile TypeScript;
-- web Jest; and
-- mobile Jest.
-
-A production build, write-enabled end-to-end run, hosted integration check, and device release pass are intentionally outside the default local gate because they can require provider access, credentials, or data mutation.
-
-## Representative high-value tests
-
-- Draft rides are hidden from non-admin members in list, search, count, and direct-detail paths.
-- A withdrawn rider cannot remain seated if the response changes while a plan is being generated.
-- A driver who stops offering seats cannot be committed from a stale plan.
-- A reduced seat count cannot create an over-capacity assignment.
-- Finalization cannot race with assignment mutation or ignore an unassigned responder.
-- Applying the same selected plan is idempotent; applying a conflicting second plan is rejected.
-- Pickup and no-show states produce distinct counts and presentation.
-- Web and mobile clients present plain-language failures rather than raw server errors on covered surfaces.
-- Accessibility tests cover landmarks, labels, validation associations, and core control semantics.
-
-## Claim verification matrix
-
-The matrix uses the technical snapshot defined in the root README.
-
-| Résumé claim | Result | Public-safe wording |
+| Suite | Size (4 Nov 2026) | Covers |
 | --- | --- | --- |
-| Full-stack application built with Next.js and TypeScript | Confirmed | Next.js/TypeScript web and API, plus an Expo/TypeScript mobile app |
-| 42-endpoint REST API | Outdated | 62 route modules and 84 HTTP method handlers in the snapshot |
-| Typed request validation using Zod | Confirmed with scope | Zod validates request data across API and server boundaries; authorization and business checks remain separate |
-| Role-based access control | Confirmed | Layered platform role, organization role, membership status, ownership, driver capability, and resource guards |
-| PostgreSQL schema covering 15+ relational entities | Confirmed | 23 Prisma models backed by PostgreSQL in the snapshot |
-| Standalone multithreaded C++ optimization service | Qualified | Developed a standalone C++ optimization service with sequential and multithreaded ranking paths, using partitioned worker ranges and mutex-protected rate limiting. |
-| Use of `std::thread`, `std::mutex`, and RAII locking | Confirmed with scope | Threads rank large pools; mutex/RAII protects shared rate-limit state |
-| Thread-safe best-solution selection with `std::mutex` | Inaccurate as previously worded | Best-plan ranking uses partitioned worker ranges and join-and-merge; the mutex does not protect winner selection |
+| Web Jest | 154 suites, 1,996 tests | API routes and domain services, authorization and visibility, planning, concurrency, lifecycle, notifications, exports, guest access, time zones, components and accessibility (axe, keyboard, labels) |
+| Mobile Jest | 58 suites, 469 tests | Navigation, API adapters, auth, friendly error messages, the planner and pickup run, offline queue, maps helpers, accessibility contracts |
+| Playwright | Browser journeys | Sign-in, administration and the ride lifecycle, against a real PostgreSQL database |
+| C++ | Built into the image | Request guards, seat-demand placement, plus a demo checking distances, candidate validity and sequential/parallel agreement |
 
-## Current limitations and unverified areas
+Date-bound tests freeze the clock, after a test that only failed after 9 p.m. showed why.
 
-- Hosted authentication, email, push, maps, database recovery, and optimizer uptime require separate authorized live checks.
-- Physical-device validation is not current for every recent mobile change, and iOS evidence is incomplete.
-- The repository has no checked-in continuous-integration workflow enforcing the local gate.
-- Mobile TypeScript and Jest are in the gate, but mobile ESLint is not currently configured.
-- The C++ checks are executable assertions and benchmarks rather than a dedicated unit-test framework.
-- Static and automated checks reduce risk but do not constitute a penetration test, privacy/legal review, or production load test.
+## Continuous integration
 
-These boundaries are kept explicit so the case study does not turn implementation evidence into unsupported production-readiness claims.
+GitHub Actions runs on every push:
+
+- **Checks:** a frozen-lockfile install, lint, type checks across the workspace, and the web Jest suite.
+- **End to end:** after checks pass, a PostgreSQL 16 service container is started, migrations are applied, and the Playwright journeys run in Chromium. A failing run uploads the Playwright report.
+- **Optimizer:** on changes to the service, the container image is built (compiling and running the C++ tests) and the running container's HTTP API is smoke-tested.
+
+Locally, one verification script runs web lint, web and mobile type checks, and web and mobile Jest, stopping at the first failure.
+
+## Representative tests
+
+- Draft rides are hidden from members in list, search, count and direct-link paths.
+- A rider who withdraws while a plan is being built is not seated by that plan.
+- A driver who stops offering seats, or offers fewer, cannot be committed from a stale plan.
+- Automatic and manual finalization agree on who is unseated, and neither can race a change.
+- Applying the same plan twice is idempotent; a conflicting second plan is refused.
+- A cancel cannot be overwritten by the automation closing the same ride.
+- Recurring rides keep their local time across daylight saving changes.
+- Pickup and no-show outcomes are idempotent and counted separately.
+- Mobile and server analytics event definitions cannot drift apart.
+- Web and mobile show plain-language failures, never raw server errors, on covered screens.
+
+## Known gaps
+
+These are tracked, not hidden:
+
+- Hosted email, push, maps, database restore and optimizer uptime need separate live checks; there is no error-tracking service yet.
+- Android has been tested end to end on a physical phone; iOS device testing is still to come.
+- The mobile Jest suite runs locally but not yet in CI, and the mobile app has no lint configuration.
+- Rate-limit checks and increments are separate operations, so a burst can slightly exceed a limit.
+- Automated checks are not a penetration test, a privacy or legal review, or a load test.
